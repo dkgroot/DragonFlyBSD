@@ -381,6 +381,7 @@ MAN=	aac.4 \
 	virtio.4 \
 	virtio_blk.4 \
 	virtio_random.4 \
+	virtio_balloon.4 \
 	virtio_scsi.4 \
 	vlan.4 \
 	vmbus.4 \
