@@ -90,10 +90,14 @@ dfui_err_t
 dfui_tcp_be_start(struct dfui_connection *c)
 {
 	struct sockaddr_in servaddr;
+	char server_ip[16] = "127.0.0.1";
 	int server_port;
 	int tru = 1;
 
-	server_port = atoi(c->rendezvous);
+	if (sscanf(c->rendezvous, "%[^:]:%u", server_ip, &server_port) != 2) {
+		strncpy(server_ip, "127.0.0.1", 16 * sizeof(char));
+		server_port = atoi(c->rendezvous);
+	}
 
 	/*
 	 * Create the tcp socket
@@ -111,7 +115,7 @@ dfui_tcp_be_start(struct dfui_connection *c)
 	bzero(&servaddr, sizeof(servaddr));
 	servaddr.sin_family = AF_INET;
 	servaddr.sin_port = htons(server_port);
-	switch(inet_pton(AF_INET, "127.0.0.1", &servaddr.sin_addr)) {
+	switch(inet_pton(AF_INET, server_ip, &servaddr.sin_addr)) {
 	case 0:
 		warnx("inet_pton(): address not parseable");
 		return(DFUI_FAILURE);
@@ -126,7 +130,7 @@ dfui_tcp_be_start(struct dfui_connection *c)
 		warn("bind()");
 		return(DFUI_FAILURE);
 	}
-	dfui_debug("BOUND_ON<<%d>>\n", T_TCP(c)->listen_sd);
+	dfui_debug("BOUND_ON<<%d>> %s:%d\n", T_TCP(c)->listen_sd, server_ip, server_port);
 	if (listen(T_TCP(c)->listen_sd, 0) == -1)
 		return(DFUI_FAILURE);
 	dfui_debug("LISTENING_ON<<%d>>\n", T_TCP(c)->listen_sd);
@@ -321,10 +325,14 @@ dfui_err_t
 dfui_tcp_fe_connect(struct dfui_connection *c)
 {
         struct sockaddr_in servaddr;
+	char server_ip[16] = "127.0.0.1";
         int server_port;
 	int connected = 0;
 
-        server_port = atoi(c->rendezvous);
+	if (sscanf(c->rendezvous, "%[^:]:%u", server_ip, &server_port) != 2) {
+		strncpy(server_ip, "127.0.0.1", 16 * sizeof(char));
+		server_port = atoi(c->rendezvous);
+	}
 
         /*
          * Create the tcp socket
@@ -339,7 +347,7 @@ dfui_tcp_fe_connect(struct dfui_connection *c)
 		bzero(&servaddr, sizeof(servaddr));
 		servaddr.sin_family = AF_INET;
 		servaddr.sin_port = htons(server_port);
-		inet_pton(AF_INET, "127.0.0.1", &servaddr.sin_addr);
+		inet_pton(AF_INET, server_ip, &servaddr.sin_addr);
 
 		if (connect(T_TCP(c)->connected_sd, (struct sockaddr *)&servaddr,
 		    sizeof(servaddr)) == 0) {

@@ -9,19 +9,25 @@ SRCS=	flow.c fn_diagnostic.c fn_install.c fn_zonetab.c \
 
 CFLAGS+=-I${.CURDIR}/..
 
-.if exists(${.OBJDIR}/../libaura)
+.if exists(${.OBJDIR}/libaura)
+LIBAURA=${.OBJDIR}/libaura/libaura.a
+.elif exists(${.OBJDIR}/../libaura)
 LIBAURA=${.OBJDIR}/../libaura/libaura.a
 .else
 LIBAURA=${.CURDIR}/../libaura/libaura.a
 .endif
 
-.if exists(${.OBJDIR}/../libdfui)
+.if exists(${.OBJDIR}/libdfui)
+LIBDFUI=${.OBJDIR}/libdfui/libdfui.a
+.elif exists(${.OBJDIR}/../libdfui)
 LIBDFUI=${.OBJDIR}/../libdfui/libdfui.a
 .else
 LIBDFUI=${.CURDIR}/../libdfui/libdfui.a
 .endif
 
-.if exists(${.OBJDIR}/../libinstaller)
+.if exists(${.OBJDIR}/libinstaller)
+LIBINSTALLER=${.OBJDIR}/libinstaller/libinstaller.a
+.elif exists(${.OBJDIR}/../libinstaller)
 LIBINSTALLER=${.OBJDIR}/../libinstaller/libinstaller.a
 .else
 LIBINSTALLER=${.CURDIR}/../libinstaller/libinstaller.a
