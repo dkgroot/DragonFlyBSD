@@ -8,6 +8,8 @@
 
 . /etc/rc.subr
 
+trap pfi_cleanup 0 1 2 3 6 15
+
 name=pfi
 start_cmd="pfi_start"
 stop_cmd=":"
@@ -120,6 +122,7 @@ pfi_start()
 
 	# Append the contents of pfi.conf onto rc.conf, so that settings
 	# (such as ifconfig_dc0="DHCP") will be picked up by pfi_rc_actions.
+	# The pfi_cleanup() function will reverse this afterwards.
 
 	cp /etc/rc.conf /etc/rc.conf.orig
 	cat /etc/pfi.conf >>/etc/rc.conf
@@ -185,10 +188,6 @@ pfi_start()
 		done
 	fi
 
-	# Restore the original rc.conf.
-
-	mv /etc/rc.conf.orig /etc/rc.conf
-
 	# Set up auto-login if requested.
 
 	if [ "X$pfi_autologin" != "XNONE" ]; then
@@ -196,14 +195,13 @@ pfi_start()
 		echo "        :al=${pfi_autologin}:tc=Pc:" >> /etc/gettytab
 		sed -i '' 's|^ttyv0.*|ttyv0 "/usr/libexec/getty AL.pfi" cons25 on secure|' /etc/ttys
 	fi
+}
 
-	# Finally, start thttpd if the user wants to use
-	# the cgi frontend.
+pfi_cleanup()
+{
+	# Restore the original rc.conf.
 
-	if [ "X$pfi_frontend" = "Xcgi" ]; then
-		echo "Starting thttpd..."
-		/usr/local/sbin/thttpd_wrapper &
-	fi
+	[ -f /etc/rc.conf.orig ] && mv /etc/rc.conf.orig /etc/rc.conf
 }
 
 load_rc_config $name

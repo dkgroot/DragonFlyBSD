@@ -82,18 +82,12 @@ installer_start()
 	fi
 
 	case "X$pfi_frontend" in
-	Xqt)
+	none)
+		for x in `ifconfig -l`; do echo -n "$x:";ifconfig $x|grep -e "inet ";done
 		$pfi_backend \
 		    -o $SOURCE_DIR \
-		    -r $RENDEZVOUS \
-		    -t $pfi_dfui_transport
-		RESULT=$?
-		;;
-	Xcgi)
-		$pfi_backend \
-		    -o $SOURCE_DIR \
-		    -r $RENDEZVOUS \
-		    -t $pfi_dfui_transport
+		    -r 0.0.0.0:9999 \
+		    -t tcp
 		RESULT=$?
 		;;
 	Xcursesvty)
