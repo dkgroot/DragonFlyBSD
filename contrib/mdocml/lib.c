@@ -1,4 +1,4 @@
-/*	$Id: lib.c,v 1.10 2014/03/23 11:25:26 schwarze Exp $ */
+/*	$Id: lib.c,v 1.13 2015/10/06 18:32:19 schwarze Exp $ */
 /*
  * Copyright (c) 2009 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -14,12 +14,13 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
-#ifdef HAVE_CONFIG_H
 #include "config.h"
-#endif
+
+#include <sys/types.h>
 
 #include <string.h>
 
+#include "roff.h"
 #include "mdoc.h"
 #include "libmdoc.h"
 
@@ -32,5 +33,5 @@ mdoc_a2lib(const char *p)
 
 #include "lib.in"
 
-	return(NULL);
+	return NULL;
 }

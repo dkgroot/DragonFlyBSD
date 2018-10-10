@@ -1,23 +1,21 @@
-/*	$Id: man_validate.c,v 1.105 2014/08/06 15:09:05 schwarze Exp $ */
+/*	$OpenBSD$ */
 /*
  * Copyright (c) 2008, 2009, 2010, 2011 Kristaps Dzonsons <kristaps@bsd.lv>
- * Copyright (c) 2010, 2012, 2013, 2014 Ingo Schwarze <schwarze@openbsd.org>
+ * Copyright (c) 2010, 2012-2016 Ingo Schwarze <schwarze@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHORS DISCLAIM ALL WARRANTIES
  * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR
  * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
  * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
-#ifdef HAVE_CONFIG_H
 #include "config.h"
-#endif
 
 #include <sys/types.h>
 
@@ -30,34 +28,31 @@
 #include <string.h>
 #include <time.h>
 
-#include "man.h"
-#include "mandoc.h"
 #include "mandoc_aux.h"
-#include "libman.h"
+#include "mandoc.h"
+#include "roff.h"
+#include "man.h"
 #include "libmandoc.h"
+#include "roff_int.h"
+#include "libman.h"
 
-#define	CHKARGS	  struct man *man, struct man_node *n
+#define	CHKARGS	  struct roff_man *man, struct roff_node *n
 
-typedef	int	(*v_check)(CHKARGS);
+typedef	void	(*v_check)(CHKARGS);
 
-static	int	  check_eq0(CHKARGS);
-static	int	  check_eq2(CHKARGS);
-static	int	  check_le1(CHKARGS);
-static	int	  check_le5(CHKARGS);
-static	int	  check_par(CHKARGS);
-static	int	  check_part(CHKARGS);
-static	int	  check_root(CHKARGS);
-static	int	  check_text(CHKARGS);
+static	void	  check_par(CHKARGS);
+static	void	  check_part(CHKARGS);
+static	void	  check_root(CHKARGS);
+static	void	  check_text(CHKARGS);
 
-static	int	  post_AT(CHKARGS);
-static	int	  post_IP(CHKARGS);
-static	int	  post_vs(CHKARGS);
-static	int	  post_fi(CHKARGS);
-static	int	  post_ft(CHKARGS);
-static	int	  post_nf(CHKARGS);
-static	int	  post_TH(CHKARGS);
-static	int	  post_UC(CHKARGS);
-static	int	  post_UR(CHKARGS);
+static	void	  post_AT(CHKARGS);
+static	void	  post_IP(CHKARGS);
+static	void	  post_vs(CHKARGS);
+static	void	  post_ft(CHKARGS);
+static	void	  post_OP(CHKARGS);
+static	void	  post_TH(CHKARGS);
+static	void	  post_UC(CHKARGS);
+static	void	  post_UR(CHKARGS);
 
 static	v_check man_valids[MAN_MAX] = {
 	post_vs,    /* br */
@@ -81,54 +76,65 @@ static	v_check man_valids[MAN_MAX] = {
 	NULL,       /* I */
 	NULL,       /* IR */
 	NULL,       /* RI */
-	check_eq0,  /* na */
 	post_vs,    /* sp */
-	post_nf,    /* nf */
-	post_fi,    /* fi */
+	NULL,       /* nf */
+	NULL,       /* fi */
 	NULL,       /* RE */
 	check_part, /* RS */
 	NULL,       /* DT */
 	post_UC,    /* UC */
-	check_le1,  /* PD */
+	NULL,       /* PD */
 	post_AT,    /* AT */
 	NULL,       /* in */
 	post_ft,    /* ft */
-	check_eq2,  /* OP */
-	post_nf,    /* EX */
-	post_fi,    /* EE */
+	post_OP,    /* OP */
+	NULL,       /* EX */
+	NULL,       /* EE */
 	post_UR,    /* UR */
 	NULL,       /* UE */
 	NULL,       /* ll */
 };
 
 
-int
-man_valid_post(struct man *man)
+void
+man_node_validate(struct roff_man *man)
 {
-	struct man_node	*n;
+	struct roff_node *n;
 	v_check		*cp;
 
 	n = man->last;
-	if (n->flags & MAN_VALID)
-		return(1);
-	n->flags |= MAN_VALID;
+	man->last = man->last->child;
+	while (man->last != NULL) {
+		man_node_validate(man);
+		if (man->last == n)
+			man->last = man->last->child;
+		else
+			man->last = man->last->next;
+	}
 
+	man->last = n;
+	man->next = ROFF_NEXT_SIBLING;
 	switch (n->type) {
-	case MAN_TEXT:
-		return(check_text(man, n));
-	case MAN_ROOT:
-		return(check_root(man, n));
-	case MAN_EQN:
-		/* FALLTHROUGH */
-	case MAN_TBL:
-		return(1);
+	case ROFFT_TEXT:
+		check_text(man, n);
+		break;
+	case ROFFT_ROOT:
+		check_root(man, n);
+		break;
+	case ROFFT_EQN:
+	case ROFFT_TBL:
+		break;
 	default:
 		cp = man_valids + n->tok;
-		return(*cp ? (*cp)(man, n) : 1);
+		if (*cp)
+			(*cp)(man, n);
+		if (man->last == n)
+			man_state(man, n);
+		break;
 	}
 }
 
-static int
+static void
 check_root(CHKARGS)
 {
 
@@ -154,77 +160,64 @@ check_root(CHKARGS)
 		man->meta.date = man->quick ? mandoc_strdup("") :
 		    mandoc_normdate(man->parse, NULL, n->line, n->pos);
 	}
-
-	return(1);
 }
 
-static int
+static void
 check_text(CHKARGS)
 {
 	char		*cp, *p;
 
 	if (MAN_LITERAL & man->flags)
-		return(1);
+		return;
 
 	cp = n->string;
 	for (p = cp; NULL != (p = strchr(p, '\t')); p++)
 		mandoc_msg(MANDOCERR_FI_TAB, man->parse,
 		    n->line, n->pos + (p - cp), NULL);
-	return(1);
 }
 
-#define	INEQ_DEFINE(x, ineq, name) \
-static int \
-check_##name(CHKARGS) \
-{ \
-	if (n->nchild ineq (x)) \
-		return(1); \
-	mandoc_vmsg(MANDOCERR_ARGCOUNT, man->parse, n->line, n->pos, \
-	    "line arguments %s %d (have %d)", \
-	    #ineq, (x), n->nchild); \
-	return(1); \
+static void
+post_OP(CHKARGS)
+{
+
+	if (n->child == NULL)
+		mandoc_msg(MANDOCERR_OP_EMPTY, man->parse,
+		    n->line, n->pos, "OP");
+	else if (n->child->next != NULL && n->child->next->next != NULL) {
+		n = n->child->next->next;
+		mandoc_vmsg(MANDOCERR_ARG_EXCESS, man->parse,
+		    n->line, n->pos, "OP ... %s", n->string);
+	}
 }
 
-INEQ_DEFINE(0, ==, eq0)
-INEQ_DEFINE(2, ==, eq2)
-INEQ_DEFINE(1, <=, le1)
-INEQ_DEFINE(5, <=, le5)
-
-static int
+static void
 post_UR(CHKARGS)
 {
 
-	if (MAN_HEAD == n->type && 1 != n->nchild)
-		mandoc_vmsg(MANDOCERR_ARGCOUNT, man->parse, n->line,
-		    n->pos, "line arguments eq 1 (have %d)", n->nchild);
-
-	return(check_part(man, n));
+	if (n->type == ROFFT_HEAD && n->child == NULL)
+		mandoc_vmsg(MANDOCERR_UR_NOHEAD, man->parse,
+		    n->line, n->pos, "UR");
+	check_part(man, n);
 }
 
-static int
+static void
 post_ft(CHKARGS)
 {
 	char	*cp;
 	int	 ok;
 
-	if (0 == n->nchild)
-		return(1);
+	if (n->child == NULL)
+		return;
 
 	ok = 0;
 	cp = n->child->string;
 	switch (*cp) {
 	case '1':
-		/* FALLTHROUGH */
 	case '2':
-		/* FALLTHROUGH */
 	case '3':
-		/* FALLTHROUGH */
 	case '4':
-		/* FALLTHROUGH */
 	case 'I':
-		/* FALLTHROUGH */
 	case 'P':
-		/* FALLTHROUGH */
 	case 'R':
 		if ('\0' == cp[1])
 			ok = 1;
@@ -246,66 +239,56 @@ post_ft(CHKARGS)
 		    n->line, n->pos, "ft %s", cp);
 		*cp = '\0';
 	}
-
-	if (1 < n->nchild)
-		mandoc_vmsg(MANDOCERR_ARGCOUNT, man->parse, n->line,
-		    n->pos, "want one child (have %d)", n->nchild);
-
-	return(1);
 }
 
-static int
+static void
 check_part(CHKARGS)
 {
 
-	if (MAN_BODY == n->type && 0 == n->nchild)
-		mandoc_msg(MANDOCERR_ARGCWARN, man->parse, n->line,
-		    n->pos, "want children (have none)");
-
-	return(1);
+	if (n->type == ROFFT_BODY && n->child == NULL)
+		mandoc_msg(MANDOCERR_BLK_EMPTY, man->parse,
+		    n->line, n->pos, man_macronames[n->tok]);
 }
 
-static int
+static void
 check_par(CHKARGS)
 {
 
 	switch (n->type) {
-	case MAN_BLOCK:
-		if (0 == n->body->nchild)
-			man_node_delete(man, n);
+	case ROFFT_BLOCK:
+		if (n->body->child == NULL)
+			roff_node_delete(man, n);
 		break;
-	case MAN_BODY:
-		if (0 == n->nchild)
+	case ROFFT_BODY:
+		if (n->child == NULL)
 			mandoc_vmsg(MANDOCERR_PAR_SKIP,
 			    man->parse, n->line, n->pos,
 			    "%s empty", man_macronames[n->tok]);
 		break;
-	case MAN_HEAD:
-		if (n->nchild)
+	case ROFFT_HEAD:
+		if (n->child != NULL)
 			mandoc_vmsg(MANDOCERR_ARG_SKIP,
 			    man->parse, n->line, n->pos,
 			    "%s %s%s", man_macronames[n->tok],
 			    n->child->string,
-			    n->nchild > 1 ? " ..." : "");
+			    n->child->next != NULL ? " ..." : "");
 		break;
 	default:
 		break;
 	}
-
-	return(1);
 }
 
-static int
+static void
 post_IP(CHKARGS)
 {
 
 	switch (n->type) {
-	case MAN_BLOCK:
-		if (0 == n->head->nchild && 0 == n->body->nchild)
-			man_node_delete(man, n);
+	case ROFFT_BLOCK:
+		if (n->head->child == NULL && n->body->child == NULL)
+			roff_node_delete(man, n);
 		break;
-	case MAN_BODY:
-		if (0 == n->parent->head->nchild && 0 == n->nchild)
+	case ROFFT_BODY:
+		if (n->parent->head->child == NULL && n->child == NULL)
 			mandoc_vmsg(MANDOCERR_PAR_SKIP,
 			    man->parse, n->line, n->pos,
 			    "%s empty", man_macronames[n->tok]);
@@ -313,29 +296,26 @@ post_IP(CHKARGS)
 	default:
 		break;
 	}
-	return(1);
 }
 
-static int
+static void
 post_TH(CHKARGS)
 {
-	struct man_node	*nb;
+	struct roff_node *nb;
 	const char	*p;
-
-	check_le5(man, n);
 
 	free(man->meta.title);
 	free(man->meta.vol);
-	free(man->meta.source);
+	free(man->meta.os);
 	free(man->meta.msec);
 	free(man->meta.date);
 
 	man->meta.title = man->meta.vol = man->meta.date =
-	    man->meta.msec = man->meta.source = NULL;
+	    man->meta.msec = man->meta.os = NULL;
 
 	nb = n;
 
-	/* ->TITLE<- MSEC DATE SOURCE VOL */
+	/* ->TITLE<- MSEC DATE OS VOL */
 
 	n = n->child;
 	if (n && n->string) {
@@ -357,7 +337,7 @@ post_TH(CHKARGS)
 		    nb->line, nb->pos, "TH");
 	}
 
-	/* TITLE ->MSEC<- DATE SOURCE VOL */
+	/* TITLE ->MSEC<- DATE OS VOL */
 
 	if (n)
 		n = n->next;
@@ -369,7 +349,7 @@ post_TH(CHKARGS)
 		    nb->line, nb->pos, "TH %s", man->meta.title);
 	}
 
-	/* TITLE MSEC ->DATE<- SOURCE VOL */
+	/* TITLE MSEC ->DATE<- OS VOL */
 
 	if (n)
 		n = n->next;
@@ -385,12 +365,14 @@ post_TH(CHKARGS)
 		    n ? n->pos : nb->pos, "TH");
 	}
 
-	/* TITLE MSEC DATE ->SOURCE<- VOL */
+	/* TITLE MSEC DATE ->OS<- VOL */
 
 	if (n && (n = n->next))
-		man->meta.source = mandoc_strdup(n->string);
+		man->meta.os = mandoc_strdup(n->string);
+	else if (man->defos != NULL)
+		man->meta.os = mandoc_strdup(man->defos);
 
-	/* TITLE MSEC DATE SOURCE ->VOL<- */
+	/* TITLE MSEC DATE OS ->VOL<- */
 	/* If missing, use the default VOL name for MSEC. */
 
 	if (n && (n = n->next))
@@ -399,43 +381,18 @@ post_TH(CHKARGS)
 	    (NULL != (p = mandoc_a2msec(man->meta.msec))))
 		man->meta.vol = mandoc_strdup(p);
 
+	if (n != NULL && (n = n->next) != NULL)
+		mandoc_vmsg(MANDOCERR_ARG_EXCESS, man->parse,
+		    n->line, n->pos, "TH ... %s", n->string);
+
 	/*
 	 * Remove the `TH' node after we've processed it for our
 	 * meta-data.
 	 */
-	man_node_delete(man, man->last);
-	return(1);
+	roff_node_delete(man, man->last);
 }
 
-static int
-post_nf(CHKARGS)
-{
-
-	check_eq0(man, n);
-
-	if (MAN_LITERAL & man->flags)
-		mandoc_msg(MANDOCERR_NF_SKIP, man->parse,
-		    n->line, n->pos, "nf");
-
-	man->flags |= MAN_LITERAL;
-	return(1);
-}
-
-static int
-post_fi(CHKARGS)
-{
-
-	check_eq0(man, n);
-
-	if ( ! (MAN_LITERAL & man->flags))
-		mandoc_msg(MANDOCERR_FI_SKIP, man->parse,
-		    n->line, n->pos, "fi");
-
-	man->flags &= ~MAN_LITERAL;
-	return(1);
-}
-
-static int
+static void
 post_UC(CHKARGS)
 {
 	static const char * const bsd_versions[] = {
@@ -450,7 +407,7 @@ post_UC(CHKARGS)
 
 	n = n->child;
 
-	if (NULL == n || MAN_TEXT != n->type)
+	if (n == NULL || n->type != ROFFT_TEXT)
 		p = bsd_versions[0];
 	else {
 		s = n->string;
@@ -468,12 +425,11 @@ post_UC(CHKARGS)
 			p = bsd_versions[0];
 	}
 
-	free(man->meta.source);
-	man->meta.source = mandoc_strdup(p);
-	return(1);
+	free(man->meta.os);
+	man->meta.os = mandoc_strdup(p);
 }
 
-static int
+static void
 post_AT(CHKARGS)
 {
 	static const char * const unix_versions[] = {
@@ -483,12 +439,12 @@ post_AT(CHKARGS)
 	    "System V Release 2",
 	};
 
+	struct roff_node *nn;
 	const char	*p, *s;
-	struct man_node	*nn;
 
 	n = n->child;
 
-	if (NULL == n || MAN_TEXT != n->type)
+	if (n == NULL || n->type != ROFFT_TEXT)
 		p = unix_versions[0];
 	else {
 		s = n->string;
@@ -498,7 +454,9 @@ post_AT(CHKARGS)
 			p = unix_versions[1];
 		else if (0 == strcmp(s, "5")) {
 			nn = n->next;
-			if (nn && MAN_TEXT == nn->type && nn->string[0])
+			if (nn != NULL &&
+			    nn->type == ROFFT_TEXT &&
+			    nn->string[0] != '\0')
 				p = unix_versions[3];
 			else
 				p = unix_versions[2];
@@ -506,41 +464,32 @@ post_AT(CHKARGS)
 			p = unix_versions[0];
 	}
 
-	free(man->meta.source);
-	man->meta.source = mandoc_strdup(p);
-	return(1);
+	free(man->meta.os);
+	man->meta.os = mandoc_strdup(p);
 }
 
-static int
+static void
 post_vs(CHKARGS)
 {
 
-	if (n->tok == MAN_br)
-		check_eq0(man, n);
-	else
-		check_le1(man, n);
-
 	if (NULL != n->prev)
-		return(1);
+		return;
 
 	switch (n->parent->tok) {
 	case MAN_SH:
-		/* FALLTHROUGH */
 	case MAN_SS:
 		mandoc_vmsg(MANDOCERR_PAR_SKIP, man->parse, n->line, n->pos,
 		    "%s after %s", man_macronames[n->tok],
 		    man_macronames[n->parent->tok]);
 		/* FALLTHROUGH */
-	case MAN_MAX:
+	case TOKEN_NONE:
 		/*
 		 * Don't warn about this because it occurs in pod2man
 		 * and would cause considerable (unfixable) warnage.
 		 */
-		man_node_delete(man, n);
+		roff_node_delete(man, n);
 		break;
 	default:
 		break;
 	}
-
-	return(1);
 }

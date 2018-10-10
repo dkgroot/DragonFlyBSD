@@ -1,4 +1,4 @@
-/*	$Id: mandoc_aux.h,v 1.2 2014/04/23 21:06:41 schwarze Exp $ */
+/*	$Id: mandoc_aux.h,v 1.6 2017/02/17 14:31:52 schwarze Exp $ */
 /*
  * Copyright (c) 2009, 2011 Kristaps Dzonsons <kristaps@bsd.lv>
  * Copyright (c) 2014 Ingo Schwarze <schwarze@openbsd.org>
@@ -15,19 +15,12 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
-#ifndef MANDOC_AUX_H
-#define MANDOC_AUX_H
 
-__BEGIN_DECLS
-
-int		  mandoc_asprintf(char **, const char *, ...);
+int		  mandoc_asprintf(char **, const char *, ...)
+			__attribute__((__format__ (__printf__, 2, 3)));
 void		 *mandoc_calloc(size_t, size_t);
 void		 *mandoc_malloc(size_t);
 void		 *mandoc_realloc(void *, size_t);
 void		 *mandoc_reallocarray(void *, size_t, size_t);
 char		 *mandoc_strdup(const char *);
 char		 *mandoc_strndup(const char *, size_t);
-
-__END_DECLS
-
-#endif /*!MANDOC_AUX_H*/
