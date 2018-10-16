@@ -115,7 +115,7 @@ boot1$s.o: boot1.S
 #${.CURDIR}/../../common/ufsread.c ${.CURDIR}/../../../../lib/libstand/hammer2.c
 
 boot2$s.s: boot2.c boot2$s.h ufsread.c hammer2.c scrc32.c
-	${CC} ${CFLAGS} ${_ADDCFLAGS$s} -S -o boot2$s.s.tmp ${.CURDIR}/boot2.c
+	${CC} ${CFLAGS} ${_ADDCFLAGS$s} -DSIOSPD=${BOOT_COMCONSOLE_SPEED} -S -o boot2$s.s.tmp ${.CURDIR}/boot2.c
 	sed -e '/align/d' -e '/nop/d' < ${.TARGET}.tmp > ${.TARGET}
 	rm -f ${.TARGET}.tmp
 

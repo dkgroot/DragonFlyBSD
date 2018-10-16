@@ -17,7 +17,6 @@
  */
 		.set SIO_PRT,SIOPRT		# Base port
 		.set SIO_FMT,SIOFMT		# 8N1
-		.set SIO_DIV,(115200/SIOSPD)	# 115200 / SPD
 
 		.globl sio_init
 		.globl sio_flush
@@ -32,27 +31,20 @@
 		 * the serial port is unmapped and the inb's all return
 		 * 0xFF (we fail to flush the input).
 		 */
-sio_init:	movw $SIO_PRT+0x3,%dx		# Data format reg
-		movb $SIO_FMT|0x80,%al		# Set format and DLAB
-		outb %al,(%dx)			# BASE+3
-		subb $0x3,%dl
-		movw $SIO_DIV,%ax		# divisor
-		outw %ax,(%dx)			# BASE+0 (divisor w/ DLAB set)
-		movw $SIO_PRT+0x2,%dx
-		movb $0x01,%al			# Enable FIFO
-
-		/* 
-		 * DISABLED - apparently many new laptops only implement 
-		 * 8250s, this might crash them? XXX
-		 */
-		 /* outb %al,(%dx) */			# BASE+2
-		incl %edx
-		movb $SIO_FMT,%al		# Clear DLAB
-		outb %al,(%dx)			# BASE+3
-		incl %edx
-		movb $0x3,%al			# RTS+DTR
-		outb %al,(%dx)			# BASE+4
-		incl %edx			# BASE+5 Line status reg
+sio_init:	pushl %eax
+		movw $SIO_PRT+0x3,%dx		# Data format reg
+		movb $SIO_FMT|0x80,%al		# Set format
+		outb %al,(%dx)			#  and DLAB
+		subb $0x3,%dl			# Divisor latch reg
+		popl %eax
+		outw %ax,(%dx)			#  BPS
+		movw $SIO_PRT+0x3,%dx		# Data format reg
+		movb $SIO_FMT,%al		# Clear
+		outb %al,(%dx)			#  DLAB
+		incl %edx			# Modem control reg
+		movb $0x3,%al			# Set RTS,
+		outb %al,(%dx)			#  DTR
+		incl %edx			# Line status reg
 
 		/* 
 		 * fall through to io_flush
@@ -61,27 +53,28 @@ sio_init:	movw $SIO_PRT+0x3,%dx		# Data format reg
 		 * return non-zero if we were unable to flush (aka
 		 * ischar always returned true)
 		 */
-sio_flush:	movb $1,%ch			# let %cl be garbage
-1:		call sio_getc.1
-		call sio_ischar
-		loopnz 1b
-		ret
-
+sio_flush:	xorl %ecx,%ecx			# Timeout
+		movb $0x80,%ch			#  counter
+sio_flush.1:	call sio_ischar 		# Check for character
+		jz sio_flush.2			# Till none
+		loop sio_flush.1		#  or counter is zero
+		movb $1, %al			# Exhausted all tries
+sio_flush.2:	ret	# To caller
 		/*
 		 * void sio_putc(int c)
 		 */
-sio_putc:	movw $SIO_PRT+0x5,%dx		# Line status reg
-		movb $0x40,%ch			# Timeout counter.  Allow %cl
-						# to contain garbage.
-sio_putc.1:	inb (%dx),%al			# Transmitter buffer empty?
-		testb $0x20,%al
+sio_putc:	pushl %eax
+		movw $SIO_PRT+0x5,%dx		# Line status reg
+		xor %ecx,%ecx			# Timeout
+		movb $0x40,%ch			#  counter
+sio_putc.1:	inb (%dx),%al			# Transmitter
+		testb $0x20,%al 		#  buffer empty?
 		loopz sio_putc.1		# No
 		jz sio_putc.2			# If timeout
-		movb 0x4(%esp,1),%al		# Get character
+		popl %eax                       # Get the character
 		subb $0x5,%dl			# Transmitter hold reg
 		outb %al,(%dx)			# Write character
-sio_putc.2:	ret
-
+sio_putc.2:	ret	# To caller
 		/*
 		 * int sio_getc(void)
 		 */

@@ -77,6 +77,10 @@
 #include "lib.h"
 #include "../bootasm.h"
 
+#ifndef SERIAL
+#define SERIAL 1
+#endif
+
 #define SECOND		18	/* Circa that many ticks in a second. */
 
 #define RBX_ASKNAME	0x0	/* -a */
@@ -128,6 +132,7 @@
 
 extern uint32_t _end;
 
+/* -S handled separately */
 static const char optstr[NOPT] = { "VhaCgmnPprsv" };
 static const unsigned char flags[NOPT] = {
     RBX_VIDEO,
@@ -161,6 +166,9 @@ static char cmd[512];
 static const char *kname;
 static uint32_t opts = RBF_VIDEO;
 static struct bootinfo bootinfo;
+#if SERIAL
+static int comspeed = SIOSPD;
+#endif
 
 /*
  * boot2 encapsulated ABI elements provided to *fsread.c
@@ -304,6 +312,7 @@ main(void)
 	*cmd = 0;
     }
 
+#if SERIAL
     /*
      * Setup our (serial) console after processing the config file.  If
      * the initialization fails, don't try to use the serial port.  This
@@ -312,10 +321,10 @@ main(void)
     if ((opts & (RBF_MUTE|RBF_SERIAL|RBF_VIDEO)) == 0)
 	opts |= RBF_SERIAL|RBF_VIDEO;
     if (opts & RBF_SERIAL) {
-	if (sio_init())
+	if (sio_init(115200 / comspeed) != 0)
 	    opts = RBF_VIDEO;
     }
-
+#endif
 
     /*
      * Try to exec stage 3 boot loader. If interrupted by a keypress,
@@ -338,9 +347,14 @@ main(void)
 
     for (;;) {
 	printf("\nDragonFly boot\n"
-	       "%u:%s(%u,%c)%s: ",
+	       "Default: %u:%s(%u,%c)%s:\n"
+	       "boot: ",
 	       dsk.drive & DRV_MASK, dev_nm[dsk.type], dsk.unit,
 	       'a' + dsk.part, kname);
+#if SERIAL	       
+	if (opts & RBX_SERIAL)
+		sio_flush();
+#endif	
 	if (!autoboot || keyhit(5*SECOND))
 	    getstr();
 	else
@@ -440,7 +454,8 @@ parse(void)
     char *arg = cmd;
     char *p, *q;
     unsigned int drv;
-    int c, i;
+    int c, i, j;
+    const char *resp;
 
     while ((c = *arg++)) {
 	if (c == ' ' || c == '\t' || c == '\n')
@@ -451,6 +466,22 @@ parse(void)
 	    *p++ = 0;
 	if (c == '-') {
 	    while ((c = *arg++)) {
+#if SERIAL
+                if (c == 'S') {
+                    j = 0;
+                    while ((u_int)(i = *arg++ - '0') <= 9)
+                        j = j * 10 + i;
+                    if (j > 0 && i == -'0') {
+                        comspeed = j;
+                        break;
+                    }
+                    printf("Com Speed:%d\n", comspeed);
+                }
+                /*
+                * Fall through to error below
+                * ('S' not in optstr[]).
+                */
+#endif
 		for (i = NOPT - 1; i >= 0; --i) {
 		    if (optstr[i] == c) {
 			opts ^= 1 << flags[i];
@@ -461,11 +492,13 @@ parse(void)
 		ok: ;	/* ugly but save space */
 	    }
 	    if (opts & RBF_PROBEKBD) {
-		i = *(uint8_t *)PTOV(0x496) & 0x10;
-		if (!i) {
-		    printf("NO KB\n");
-		    opts |= RBF_VIDEO | RBF_SERIAL;
+		if (*(uint8_t *)PTOV(0x496) & 0x10) {
+			resp="no";
+		} else {
+			opts |= RBF_VIDEO | RBF_SERIAL;		/* Dual Mode */
+			resp="yes";
 		}
+		printf("Keyboard: %s\n", resp);
 		opts &= ~RBF_PROBEKBD;
 	    }
 	} else {
