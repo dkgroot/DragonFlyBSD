@@ -95,8 +95,10 @@ static struct bootinfo	*initial_bootinfo;
 struct arch_switch	archsw;		/* MI/MD interface boundary */
 
 static void		extract_currdev(void);
+/*
 static int		isa_inb(int port);
 static void		isa_outb(int port, int value);
+*/
 void			exit(int code);
 
 /* from vers.c */
@@ -105,41 +107,11 @@ extern	char bootprog_name[], bootprog_rev[], bootprog_date[], bootprog_maker[];
 /* XXX debugging */
 extern char _end[];
 
-#define COMCONSOLE_DEBUG
-#ifdef COMCONSOLE_DEBUG
-
-static void
-WDEBUG_INIT(void)
-{
-    isa_outb(0x3f8+3, 0x83);	/* DLAB + 8N1 */
-    isa_outb(0x3f8+0, (115200 / 9600) & 0xFF);
-    isa_outb(0x3f8+1, (115200 / 9600) >> 8);
-    isa_outb(0x3f8+3, 0x03);	/* 8N1 */
-    isa_outb(0x3f8+4, 0x03);	/* RTS+DTR */
-    isa_outb(0x3f8+2, 0x01);	/* FIFO_ENABLE */
-}
-
-static void
-WDEBUG(char c)
-{
-    isa_outb(0x3f8, c);
-}
-
-#else
-
-#define WDEBUG(x)
-#define WDEBUG_INIT()
-
-#endif
-
 int
 main(void)
 {
     char *memend;
     int i;
-
-    WDEBUG_INIT();
-    WDEBUG('X');
 
     /* Pick up arguments */
     kargs = (void *)__args;
@@ -147,15 +119,9 @@ main(void)
     initial_bootdev = kargs->bootdev;
     initial_bootinfo = kargs->bootinfo ? (struct bootinfo *)PTOV(kargs->bootinfo) : NULL;
 
-#ifdef COMCONSOLE_DEBUG
-    printf("args at %p initial_howto = %08x bootdev = %08x bootinfo = %p\n", 
-	kargs, initial_howto, initial_bootdev, initial_bootinfo);
-#endif
-
     /* Initialize the v86 register set to a known-good state. */
     bzero(&v86, sizeof(v86));
     v86.efl = PSL_RESERVED_DEFAULT | PSL_I;
-
 
     /* 
      * Initialize the heap as early as possible.  Once this is done, 
@@ -208,11 +174,19 @@ main(void)
     } else if ((initial_howto & (RB_VIDEO|RB_SERIAL)) != (RB_VIDEO|RB_SERIAL)) {
 	if (initial_howto & RB_VIDEO)
 	    setenv("console", "vidconsole", 1);
-	if (initial_howto & RB_SERIAL)
+	if (initial_howto & RB_SERIAL) {
 	    setenv("console", "comconsole", 1);
+	    setenv("comconsole_speed", "115200", 1);
+	    setenv("sio0.baud", "115220", 1);
+        } 
     }
     cons_probe();
 
+//#ifdef DEBUG
+    printf("args at %p initial_howto = %08x bootdev = %08x bootinfo = %p\n", 
+	kargs, initial_howto, initial_bootdev, initial_bootinfo);
+
+//#endif
     /*
      * Initialise the block cache
      */
@@ -236,10 +210,10 @@ main(void)
      * March through the device switch probing for things.
      */
     for (i = 0; devsw[i] != NULL; i++) {
-	WDEBUG('M' + i);
+	/*WDEBUG('M' + i);*/
 	if (devsw[i]->dv_init != NULL)
 	    (devsw[i]->dv_init)();
-	WDEBUG('M' + i);
+	/*WDEBUG('M' + i);*/
     }
     printf("BIOS %dkB/%dkB available memory\n", 
 	    bios_basemem / 1024, bios_extmem / 1024);
@@ -387,35 +361,5 @@ command_heap(int argc, char *argv[])
     printf("heap %p-%p (%d)\n", base, base + bytes, (int)bytes);
     printf("stack at %p\n", &argc);
     return(CMD_OK);
-}
-
-/* ISA bus access functions for PnP, derived from <machine/cpufunc.h> */
-static int		
-isa_inb(int port)
-{
-    u_char	data;
-    
-    if (__builtin_constant_p(port) && 
-	(((port) & 0xffff) < 0x100) && 
-	((port) < 0x10000)) {
-	__asm __volatile("inb %1,%0" : "=a" (data) : "id" ((u_short)(port)));
-    } else {
-	__asm __volatile("inb %%dx,%0" : "=a" (data) : "d" (port));
-    }
-    return(data);
-}
-
-static void
-isa_outb(int port, int value)
-{
-    u_char	al = value;
-    
-    if (__builtin_constant_p(port) && 
-	(((port) & 0xffff) < 0x100) && 
-	((port) < 0x10000)) {
-	__asm __volatile("outb %0,%1" : : "a" (al), "id" ((u_short)(port)));
-    } else {
-        __asm __volatile("outb %0,%%dx" : : "a" (al), "d" (port));
-    }
 }
 

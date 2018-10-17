@@ -21,20 +21,24 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- *
- * $FreeBSD: src/sys/boot/i386/libi386/comconsole.c,v 1.10 2003/09/16 11:24:23 bde Exp $
- * $DragonFly: src/sys/boot/pc32/libi386/comconsole.c,v 1.9 2004/06/27 21:27:36 dillon Exp $
  */
+
+#include <sys/cdefs.h>
+__FBSDID("$FreeBSD$");
 
 #include <stand.h>
 #include <bootstrap.h>
 #include <machine/cpufunc.h>
-#include <dev/serial/ic_layer/ns16550.h>
+#if 0 /* PCI */
+#include <bus/pci/pcireg.h>
+#endif
+#include <ns16550.h>
 #include "libi386.h"
 
 #define COMC_FMT	0x3		/* 8N1 */
 #define COMC_TXWAIT	0x40000		/* transmit timeout */
 #define COMC_BPS(x)	(115200 / (x))	/* speed to DLAB divisor */
+#define COMC_DIV2BPS(x)	(115200 / (x))	/* DLAB divisor to speed */
 
 #ifndef	COMPORT
 #define COMPORT		0x3f8
@@ -47,9 +51,26 @@ static void	comc_probe(struct console *cp);
 static int	comc_init(int arg);
 static void	comc_putchar(int c);
 static int	comc_getchar(void);
+static int	comc_getspeed(void);
 static int	comc_ischar(void);
+static int	comc_parseint(const char *string);
+#if 0 /* PCI */
+static uint32_t comc_parse_pcidev(const char *string);
+static int	comc_pcidev_set(struct env_var *ev, int flags,
+		    const void *value);
+static int	comc_pcidev_handle(uint32_t locator);
+#endif
+static int	comc_port_set(struct env_var *ev, int flags,
+		    const void *value);
+static void	comc_setup(int speed, int port);
+static int	comc_speed_set(struct env_var *ev, int flags,
+		    const void *value);
 
-static int	comc_started;
+static int	comc_curspeed;
+static int	comc_port = COMPORT;
+#if 0 /* PCI */
+static uint32_t	comc_locator;
+#endif
 
 struct console comconsole = {
     "comconsole",
@@ -62,65 +83,79 @@ struct console comconsole = {
     comc_ischar
 };
 
-/*
- * Probe for a comconsole.  If the comport is not mapped at boot time (which
- * is often true on laptops), don't try to access it.  If we can't clear 
- * the input fifo, don't try to access it later.
- *
- * Normally the stage-2 bootloader will do this detection and hand us
- * appropriate flags, but some bootloaders (pxe, cdboot) load the loader
- * directly so we have to check again here.
- */
 static void
 comc_probe(struct console *cp)
 {
-    int i;
+    char intbuf[16];
+    char *cons, *env;
+    int speed, port;
+#if 0 /* PCI */    
+    uint32_t locator;
+#endif
+    if (comc_curspeed == 0) {
+	comc_curspeed = COMSPEED;
+	/*
+	 * Assume that the speed was set by an earlier boot loader if
+	 * comconsole is already the preferred console.
+	 */
+	cons = getenv("console");
+	if ((cons != NULL && strcmp(cons, comconsole.c_name) == 0) ||
+	    getenv("boot_multicons") != NULL) {
+		comc_curspeed = comc_getspeed();
+	}
 
-    if (inb(COMPORT + com_lsr) == 0xFF)
-	return;
-    for (i = 255; i >= 0; --i) {
-	if (comc_ischar() == 0)
-	    break;
-        inb(COMPORT + com_data);
+	env = getenv("comconsole_speed");
+	if (env != NULL) {
+	    speed = comc_parseint(env);
+	    if (speed > 0)
+		comc_curspeed = speed;
+	}
+
+	sprintf(intbuf, "%d", comc_curspeed);
+	unsetenv("comconsole_speed");
+	env_setenv("comconsole_speed", EV_VOLATILE, intbuf, comc_speed_set,
+	    env_nounset);
+
+	env = getenv("comconsole_port");
+	if (env != NULL) {
+	    port = comc_parseint(env);
+	    if (port > 0)
+		comc_port = port;
+	}
+
+	sprintf(intbuf, "%d", comc_port);
+	unsetenv("comconsole_port");
+	env_setenv("comconsole_port", EV_VOLATILE, intbuf, comc_port_set,
+	    env_nounset);
+
+	printf("Using Serial Speed:%d\n", comc_curspeed);		/* temporary serial debug */
+
+/*
+	env = getenv("comconsole_pcidev");
+	if (env != NULL) {
+	    locator = comc_parse_pcidev(env);
+	    if (locator != 0)
+		    comc_pcidev_handle(locator);
+	}
+
+	unsetenv("comconsole_pcidev");
+	env_setenv("comconsole_pcidev", EV_VOLATILE, env, comc_pcidev_set,
+	    env_nounset);
+*/
     }
-    if (i < 0)
-	return;
-    cp->c_flags |= (C_PRESENTIN | C_PRESENTOUT);
+    comc_setup(comc_curspeed, comc_port);
 }
 
 static int
 comc_init(int arg)
 {
-    if (comc_started && arg == 0)
-	return 0;
-    comc_started = 1;
 
-    outb(COMPORT + com_cfcr, CFCR_DLAB | COMC_FMT);
-    outb(COMPORT + com_dlbl, COMC_BPS(COMSPEED) & 0xff);
-    outb(COMPORT + com_dlbh, COMC_BPS(COMSPEED) >> 8);
-    outb(COMPORT + com_cfcr, COMC_FMT);
-    outb(COMPORT + com_mcr, MCR_RTS | MCR_DTR);
+    comc_setup(comc_curspeed, comc_port);
 
-#if 0
-    /*
-     * Enable the FIFO so the serial port output in dual console mode doesn't
-     * interfere so much with the disk twiddle.
-     *
-     * DISABLED - apparently many new laptops implement only the base 8250,
-     * writing to this port can crash them.
-     */
-    outb(COMPORT + com_fifo, FIFO_ENABLE);
-#endif
-
-    /*
-     * Give the serial port a little time to settle after asserting RTS and
-     * DTR, then drain any pending garbage.
-     */
-    delay(1000000 / 10);
-    while (comc_ischar())
-        inb(COMPORT + com_data);
-
-    return(0);
+    if ((comconsole.c_flags & (C_PRESENTIN | C_PRESENTOUT)) ==
+	(C_PRESENTIN | C_PRESENTOUT))
+	return (CMD_OK);
+    return (CMD_ERROR);
 }
 
 static void
@@ -128,22 +163,265 @@ comc_putchar(int c)
 {
     int wait;
 
-    for (wait = COMC_TXWAIT; wait > 0; wait--) {
-        if (inb(COMPORT + com_lsr) & LSR_TXRDY) {
-	    outb(COMPORT + com_data, (u_char)c);
+    for (wait = COMC_TXWAIT; wait > 0; wait--)
+        if (inb(comc_port + com_lsr) & LSR_TXRDY) {
+	    outb(comc_port + com_data, (u_char)c);
 	    break;
 	}
-    }
 }
 
 static int
 comc_getchar(void)
 {
-    return(comc_ischar() ? inb(COMPORT + com_data) : -1);
+    return (comc_ischar() ? inb(comc_port + com_data) : -1);
 }
 
 static int
 comc_ischar(void)
 {
-    return(inb(COMPORT + com_lsr) & LSR_RXRDY);
+    return (inb(comc_port + com_lsr) & LSR_RXRDY);
+}
+
+static int
+comc_speed_set(struct env_var *ev, int flags, const void *value)
+{
+    int speed;
+
+    if (value == NULL || (speed = comc_parseint(value)) <= 0) {
+	printf("Invalid speed\n");
+	return (CMD_ERROR);
+    }
+
+    if (comc_curspeed != speed)
+	comc_setup(speed, comc_port);
+
+    env_setenv(ev->ev_name, flags | EV_NOHOOK, value, NULL, NULL);
+
+    return (CMD_OK);
+}
+
+static int
+comc_port_set(struct env_var *ev, int flags, const void *value)
+{
+    int port;
+
+    if (value == NULL || (port = comc_parseint(value)) <= 0) {
+	printf("Invalid port\n");
+	return (CMD_ERROR);
+    }
+
+    if (comc_port != port)
+	comc_setup(comc_curspeed, port);
+
+    env_setenv(ev->ev_name, flags | EV_NOHOOK, value, NULL, NULL);
+
+    return (CMD_OK);
+}
+
+/*
+ * Input: bus:dev:func[:bar]. If bar is not specified, it is 0x10.
+ * Output: bar[24:16] bus[15:8] dev[7:3] func[2:0]
+ */
+#if 0 /* PCI */
+static uint32_t
+comc_parse_pcidev(const char *string)
+{
+#ifdef NO_PCI
+	return (0);
+#else
+	char *p, *p1;
+	uint8_t bus, dev, func, bar;
+	uint32_t locator;
+	int pres;
+
+	pres = strtol(string, &p, 0);
+	if (p == string || *p != ':' || pres < 0 )
+		return (0);
+	bus = pres;
+	p1 = ++p;
+
+	pres = strtol(p1, &p, 0);
+	if (p == string || *p != ':' || pres < 0 )
+		return (0);
+	dev = pres;
+	p1 = ++p;
+
+	pres = strtol(p1, &p, 0);
+	if (p == string || (*p != ':' && *p != '\0') || pres < 0 )
+		return (0);
+	func = pres;
+
+	if (*p == ':') {
+		p1 = ++p;
+		pres = strtol(p1, &p, 0);
+		if (p == string || *p != '\0' || pres <= 0 )
+			return (0);
+		bar = pres;
+	} else
+		bar = 0x10;
+
+	locator = (bar << 16) | biospci_locator(bus, dev, func);
+	return (locator);
+#endif
+}
+
+static int
+comc_pcidev_handle(uint32_t locator)
+{
+#ifdef NO_PCI
+	return (CMD_ERROR);
+#else
+	char intbuf[64];
+	uint32_t port;
+
+	if (biospci_read_config(locator & 0xffff,
+	    (locator & 0xff0000) >> 16, BIOSPCI_32BITS, &port) == -1) {
+		printf("Cannot read bar at 0x%x\n", locator);
+		return (CMD_ERROR);
+	}
+
+	/* 
+	 * biospci_read_config() sets port == 0xffffffff if the pcidev
+	 * isn't found on the bus.  Check for 0xffffffff and return to not
+	 * panic in BTX.
+	 */
+	if (port == 0xffffffff) {
+		printf("Cannot find specified pcidev\n");
+		return (CMD_ERROR);
+	}
+	if (!PCI_BAR_IO(port)) {
+		printf("Memory bar at 0x%x\n", locator);
+		return (CMD_ERROR);
+	}
+        port &= PCIM_BAR_IO_BASE;
+
+	sprintf(intbuf, "%d", port);
+	unsetenv("comconsole_port");
+	env_setenv("comconsole_port", EV_VOLATILE, intbuf,
+		   comc_port_set, env_nounset);
+
+	comc_setup(comc_curspeed, port);
+	comc_locator = locator;
+
+	return (CMD_OK);
+#endif
+}
+
+static int
+comc_pcidev_set(struct env_var *ev, int flags, const void *value)
+{
+	uint32_t locator;
+	int error;
+
+	if (value == NULL || (locator = comc_parse_pcidev(value)) <= 0) {
+		printf("Invalid pcidev\n");
+		return (CMD_ERROR);
+	}
+	if ((comconsole.c_flags & (C_ACTIVEIN | C_ACTIVEOUT)) != 0 &&
+	    comc_locator != locator) {
+		error = comc_pcidev_handle(locator);
+		if (error != CMD_OK)
+			return (error);
+	}
+	env_setenv(ev->ev_name, flags | EV_NOHOOK, value, NULL, NULL);
+	return (CMD_OK);
+}
+#endif
+
+static void
+comc_setup(int speed, int port)
+{
+    static int TRY_COUNT = 1000000;
+    char intbuf[64];
+    int tries;
+
+    unsetenv("hw.uart.console");
+    comc_curspeed = speed;
+    comc_port = port;
+    if ((comconsole.c_flags & (C_ACTIVEIN | C_ACTIVEOUT)) == 0)
+	return;
+
+    outb(comc_port + com_cfcr, CFCR_DLAB | COMC_FMT);
+    outb(comc_port + com_dlbl, COMC_BPS(speed) & 0xff);
+    outb(comc_port + com_dlbh, COMC_BPS(speed) >> 8);
+    outb(comc_port + com_cfcr, COMC_FMT);
+    outb(comc_port + com_mcr, MCR_RTS | MCR_DTR);
+
+    tries = 0;
+    do
+        inb(comc_port + com_data);
+    while (inb(comc_port + com_lsr) & LSR_RXRDY && ++tries < TRY_COUNT);
+
+    if (tries < TRY_COUNT) {
+	comconsole.c_flags |= (C_PRESENTIN | C_PRESENTOUT);
+	sprintf(intbuf, "io:%d,br:%d", comc_port, comc_curspeed);
+	env_setenv("hw.uart.console", EV_VOLATILE, intbuf, NULL, NULL);
+    } else
+	comconsole.c_flags &= ~(C_PRESENTIN | C_PRESENTOUT);
+}
+
+static int
+comc_parseint(const char *speedstr)
+{
+    char *p;
+    int speed;
+
+    speed = strtol(speedstr, &p, 0);
+    if (p == speedstr || *p != '\0' || speed <= 0)
+	return (-1);
+
+    return (speed);
+}
+
+static int
+comc_getspeed(void)
+{
+	u_int	divisor;
+	u_char	dlbh;
+	u_char	dlbl;
+	u_char	cfcr;
+
+	cfcr = inb(comc_port + com_cfcr);
+	outb(comc_port + com_cfcr, CFCR_DLAB | cfcr);
+
+	dlbl = inb(comc_port + com_dlbl);
+	dlbh = inb(comc_port + com_dlbh);
+
+	outb(comc_port + com_cfcr, cfcr);
+
+	divisor = dlbh << 8 | dlbl;
+
+	/* XXX there should be more sanity checking. */
+	if (divisor == 0)
+		return (COMSPEED);
+	return (COMC_DIV2BPS(divisor));
+}
+
+int
+isa_inb(int port)
+{
+    u_char      data;
+
+    if (__builtin_constant_p(port) &&
+        (((port) & 0xffff) < 0x100) &&
+        ((port) < 0x10000)) {
+        __asm __volatile("inb %1,%0" : "=a" (data) : "id" ((u_short)(port)));
+    } else {
+        __asm __volatile("inb %%dx,%0" : "=a" (data) : "d" (port));
+    }
+    return(data);
+}
+
+void
+isa_outb(int port, int value)
+{
+    u_char      al = value;
+
+    if (__builtin_constant_p(port) &&
+        (((port) & 0xffff) < 0x100) &&
+        ((port) < 0x10000)) {
+        __asm __volatile("outb %0,%1" : : "a" (al), "id" ((u_short)(port)));
+    } else {
+        __asm __volatile("outb %0,%%dx" : : "a" (al), "d" (port));
+    }
 }
