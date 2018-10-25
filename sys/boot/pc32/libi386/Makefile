@@ -1,5 +1,11 @@
 # $FreeBSD: src/sys/boot/i386/libi386/Makefile,v 1.32 2003/07/02 12:45:45 ru Exp $
 #
+.if ${MACHINE_ARCH} == "x86_64"
+.MAKEFLAGS:  MACHINE_ARCH=i386 MACHINE_PLATFORM=pc32 REALLY_X86_64=true
+.else
+.MAKEFLAGS:  REALLY_X86_64=false
+.endif
+
 LIB=			i386
 INTERNALLIB=		true
 SYSDIR?=		${.CURDIR}/../../..
@@ -9,7 +15,8 @@ SRCS=	biosacpi.c bioscd.c biosdisk.c biosmem.c biospnp.c \
 	biospci.c biossmap.c bootinfo.c bootinfo32.c bootinfo64.c \
 	comconsole.c devicename.c elf32_freebsd.c elf64_freebsd.c \
 	i386_copy.c i386_module.c nullconsole.c pxe.c pxetramp.s \
-	smbios.c time.c vidconsole.c x86_64_tramp.S
+	smbios.c time.c vidconsole.c x86_64_tramp.S \
+	multiboot.c multiboot_tramp.S
 
 CFLAGS+=	-ffreestanding
 CFLAGS+=	-fno-strict-aliasing

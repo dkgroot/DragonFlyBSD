@@ -54,7 +54,8 @@ struct moduledir {
 };
 
 static int			file_load(char *filename, vm_offset_t dest, struct preloaded_file **result);
-static int			file_loadraw(char *type, char *name);
+//static int			file_loadraw(char *type, char *name);
+struct preloaded_file *		file_loadraw(const char *fname, char *type, int insert);
 static int			file_load_dependencies(struct preloaded_file *base_mod);
 static char *			file_search(const char *name, char **extlist);
 static struct kernel_module *	file_findmodule(struct preloaded_file *fp, char *modname, struct mod_depend *verinfo);
@@ -157,7 +158,9 @@ command_load(int argc, char *argv[])
 	    command_errmsg = "invalid load type";
 	    return(CMD_ERROR);
 	}
-	return(file_loadraw(typestr, argv[1]));
+	//return(file_loadraw(typestr, argv[1]));
+	struct preloaded_file * plf=file_loadraw(typestr, argv[1], 1);
+	return plf ? CMD_OK : CMD_ERROR;
     }
     /*
      * Do we have explicit KLD load ?
@@ -404,6 +407,7 @@ file_load_dependencies(struct preloaded_file *base_file)
  * We've been asked to load (name) as (type), so just suck it in,
  * no arguments or anything.
  */
+#if 0
 int
 file_loadraw(char *type, char *name)
 {
@@ -476,6 +480,78 @@ file_loadraw(char *type, char *name)
     file_insert_tail(fp);
     close(fd);
     return(CMD_OK);
+}
+#endif
+struct preloaded_file *
+file_loadraw(const char *fname, char *type, int insert)
+{
+    struct preloaded_file	*fp;
+    char			*name;
+    int				fd, got;
+    vm_offset_t			laddr;
+
+    /* We can't load first */
+    if ((file_findfile(NULL, NULL)) == NULL) {
+	command_errmsg = "can't load file before kernel";
+	return(NULL);
+    }
+
+    /* locate the file on the load path */
+    name = file_search(fname, NULL);
+    if (name == NULL) {
+	snprintf(command_errbuf, sizeof(command_errbuf),
+	    "can't find '%s'", fname);
+	return(NULL);
+    }
+
+    if ((fd = open(name, O_RDONLY)) < 0) {
+	snprintf(command_errbuf, sizeof(command_errbuf),
+	    "can't open '%s': %s", name, strerror(errno));
+	free(name);
+	return(NULL);
+    }
+
+    if (archsw.arch_loadaddr != NULL)
+	loadaddr = archsw.arch_loadaddr(LOAD_RAW, name, loadaddr);
+
+    printf("%s ", name);
+
+    laddr = loadaddr;
+    for (;;) {
+	/* read in 4k chunks; size is not really important */
+	got = archsw.arch_readin(fd, laddr, 4096);
+	if (got == 0)				/* end of file */
+	    break;
+	if (got < 0) {				/* error */
+	    snprintf(command_errbuf, sizeof(command_errbuf),
+		"error reading '%s': %s", name, strerror(errno));
+	    free(name);
+	    close(fd);
+	    return(NULL);
+	}
+	laddr += got;
+    }
+
+    printf("size=%#jx\n", (uintmax_t)(laddr - loadaddr));
+
+    /* Looks OK so far; create & populate control structure */
+    fp = file_alloc();
+    fp->f_name = strdup(name);
+    fp->f_type = strdup(type);
+    fp->f_args = NULL;
+    fp->f_metadata = NULL;
+    fp->f_loader = -1;
+    fp->f_addr = loadaddr;
+    fp->f_size = laddr - loadaddr;
+
+    /* recognise space consumption */
+    loadaddr = laddr;
+
+    /* Add to the list of loaded files */
+    if (insert != 0)
+    	file_insert_tail(fp);
+    close(fd);
+    return(fp);
 }
 
 /*
@@ -660,6 +736,22 @@ file_findmetadata(struct preloaded_file *fp, int type)
 	if (md->md_type == type)
 	    break;
     return(md);
+}
+
+/*
+ * Remove all metadata from the file.
+ */
+void
+file_removemetadata(struct preloaded_file *fp)
+{
+    struct file_metadata *md, *next;
+
+    for (md = fp->f_metadata; md != NULL; md = next)
+    {
+	next = md->md_next;
+	free(md);
+    }
+    fp->f_metadata = NULL;
 }
 
 struct file_metadata *

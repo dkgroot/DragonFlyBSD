@@ -75,7 +75,7 @@ static int __elfN(loadimage)(struct preloaded_file *mp, elf_file_t ef, u_int64_t
 static int __elfN(lookup_symbol)(struct preloaded_file *mp, elf_file_t ef, const char* name, Elf_Sym* sym);
 static int __elfN(reloc_ptr)(struct preloaded_file *mp, elf_file_t ef,
     Elf_Addr p, void *val, size_t len);
-static int __elfN(parse_modmetadata)(struct preloaded_file *mp, elf_file_t ef);
+static int __elfN(parse_modmetadata)(struct preloaded_file *mp, elf_file_t ef, Elf_Addr p_start, Elf_Addr p_end);
 static symaddr_fn __elfN(symaddr);
 static char	*fake_modname(const char *name);
 
@@ -84,6 +84,130 @@ const char	*__elfN(moduletype) = "elf module";
 
 u_int64_t	__elfN(relocation_offset) = 0;
 
+extern void elf_wrong_field_size(void);
+#define CONVERT_FIELD(b, f, e)		\
+    switch (sizeof((b)->f)) {		\
+    case 2:				\
+        /*(b)->f = e ## 16toh((b)->f);*/	\
+        break;				\
+    case 4:				\
+        /*(b)->f = e ## 32toh((b)->f);*/	\
+        break;				\
+    case 8:				\
+        /*(b)->f = e ## 64toh((b)->f);*/	\
+        break;				\
+    default:				\
+        /* Force a link time error. */	\
+        elf_wrong_field_size();		\
+        break;				\
+    }
+
+#define CONVERT_SWITCH(h, d, f)		\
+    switch ((h)->e_ident[EI_DATA]) {	\
+    case ELFDATA2MSB:			\
+        /*f(d, be);*/			\
+        break;				\
+    case ELFDATA2LSB:			\
+        /*f(d, le);*/			\
+        break;				\
+    default:				\
+        return (EINVAL);		\
+    }
+
+static int elf_header_convert(Elf_Ehdr *ehdr)
+{
+    /*
+     * Fixup ELF header endianness.
+     *
+     * The Xhdr structure was loaded using block read call to optimize file
+     * accesses. It might happen, that the endianness of the system memory
+     * is different that endianness of the ELF header.  Swap fields here to
+     * guarantee that Xhdr always contain valid data regardless of
+     * architecture.
+     */
+#define HEADER_FIELDS(b, e)			\
+    CONVERT_FIELD(b, e_type, e);		\
+    CONVERT_FIELD(b, e_machine, e);		\
+    CONVERT_FIELD(b, e_version, e);		\
+    CONVERT_FIELD(b, e_entry, e);		\
+    CONVERT_FIELD(b, e_phoff, e);		\
+    CONVERT_FIELD(b, e_shoff, e);		\
+    CONVERT_FIELD(b, e_flags, e);		\
+    CONVERT_FIELD(b, e_ehsize, e);		\
+    CONVERT_FIELD(b, e_phentsize, e);	\
+    CONVERT_FIELD(b, e_phnum, e);		\
+    CONVERT_FIELD(b, e_shentsize, e);	\
+    CONVERT_FIELD(b, e_shnum, e);		\
+    CONVERT_FIELD(b, e_shstrndx, e)
+
+    CONVERT_SWITCH(ehdr, ehdr, HEADER_FIELDS);
+
+#undef HEADER_FIELDS
+    return (0);
+}
+static int
+__elfN(load_elf_header)(char *filename, elf_file_t ef)
+{
+    ssize_t			 bytes_read;
+    Elf_Ehdr		*ehdr;
+    int			 err;
+
+    /*
+     * Open the image, read and validate the ELF header
+     */
+    if (filename == NULL)	/* can't handle nameless */
+        return (EFTYPE);
+    if ((ef->fd = open(filename, O_RDONLY)) == -1)
+        return (errno);
+    ef->firstpage = malloc(PAGE_SIZE);
+    if (ef->firstpage == NULL) {
+        close(ef->fd);
+        return (ENOMEM);
+    }
+    bytes_read = read(ef->fd, ef->firstpage, PAGE_SIZE);
+    ef->firstlen = (size_t)bytes_read;
+    if (bytes_read < 0 || ef->firstlen <= sizeof(Elf_Ehdr)) {
+        err = EFTYPE; /* could be EIO, but may be small file */
+        goto error;
+    }
+    ehdr = ef->ehdr = (Elf_Ehdr *)ef->firstpage;
+
+    /* Is it ELF? */
+    if (!IS_ELF(*ehdr)) {
+        err = EFTYPE;
+        goto error;
+    }
+
+    if (ehdr->e_ident[EI_CLASS] != ELF_TARG_CLASS || /* Layout ? */
+            ehdr->e_ident[EI_DATA] != ELF_TARG_DATA ||
+            ehdr->e_ident[EI_VERSION] != EV_CURRENT) /* Version ? */ {
+        err = EFTYPE;
+        goto error;
+    }
+
+    err = elf_header_convert(ehdr);
+    if (err)
+        goto error;
+
+    if (ehdr->e_version != EV_CURRENT || ehdr->e_machine != ELF_TARG_MACH) {
+        /* Machine ? */
+        err = EFTYPE;
+        goto error;
+    }
+
+    return (0);
+
+error:
+    if (ef->firstpage != NULL) {
+        free(ef->firstpage);
+        ef->firstpage = NULL;
+    }
+    if (ef->fd != -1) {
+        close(ef->fd);
+        ef->fd = -1;
+    }
+    return (err);
+}
 /*
  * Attempt to load the file (file) as an ELF module.  It will be stored at
  * (dest), and a pointer to a module structure describing the loaded object
@@ -91,6 +215,12 @@ u_int64_t	__elfN(relocation_offset) = 0;
  */
 int
 __elfN(loadfile)(char *filename, u_int64_t dest, struct preloaded_file **result)
+{
+    return (__elfN(loadfile_raw)(filename, dest, result, 0));
+} 
+
+int
+__elfN(loadfile_raw)(char *filename, u_int64_t dest, struct preloaded_file **result, int multiboot)
 {
     struct preloaded_file	*fp, *kfp;
     struct elf_file		ef;
@@ -145,6 +275,12 @@ __elfN(loadfile)(char *filename, u_int64_t dest, struct preloaded_file **result)
     kfp = file_findfile(NULL, NULL);
     if (ehdr->e_type == ET_DYN) {
 	/* Looks like a kld module */
+	if (multiboot != 0) {
+	    printf("elf" __XSTRING(__ELF_WORD_SIZE)
+	        "_loadfile: can't load module as multiboot\n");
+            err = EPERM;
+            goto oerr;
+        }	
 	if (kfp == NULL) {
 	    printf("elf" __XSTRING(__ELF_WORD_SIZE) "_loadfile: can't load module before kernel\n");
 	    err = EPERM;
@@ -196,6 +332,8 @@ __elfN(loadfile)(char *filename, u_int64_t dest, struct preloaded_file **result)
 	    err = EPERM;
 	    goto out;
     }
+    if (ef.kernel == 1 && multiboot == 0)
+        setenv("kernelname", filename, 1);
 
     /*
      * Set the kernel name and module path correctly for the kernel's
@@ -228,7 +366,10 @@ __elfN(loadfile)(char *filename, u_int64_t dest, struct preloaded_file **result)
 	free(mptr);
     }
     fp->f_name = strdup(filename);
-    fp->f_type = strdup(ef.kernel ? __elfN(kerneltype) : __elfN(moduletype));
+    if (multiboot == 0)
+        fp->f_type = strdup(ef.kernel ? __elfN(kerneltype) : __elfN(moduletype));
+    else
+        fp->f_type = strdup("elf multiboot kernel");    
 
 #ifdef ELF_VERBOSE
     if (ef.kernel)
@@ -287,6 +428,8 @@ __elfN(loadimage)(struct preloaded_file *fp, elf_file_t ef, u_int64_t off)
     int		symtabindex;
     Elf_Size	size;
     u_int	fpcopy;
+    Elf_Sym	sym;
+    Elf_Addr	p_start, p_end;
 
     dp = NULL;
     shdr = NULL;
@@ -541,7 +684,14 @@ nosyms:
     COPYOUT(ef->hashtab + 1, &ef->nchains, sizeof(ef->nchains));
     ef->buckets = ef->hashtab + 2;
     ef->chains = ef->buckets + ef->nbuckets;
-    if (__elfN(parse_modmetadata)(fp, ef) == 0)
+    
+    if (__elfN(lookup_symbol)(fp, ef, "__start_set_modmetadata_set", &sym) != 0)
+            return 0;
+    p_start = sym.st_value + ef->off;
+    if (__elfN(lookup_symbol)(fp, ef, "__stop_set_modmetadata_set",&sym) != 0)
+        return ENOENT;
+    p_end = sym.st_value + ef->off;    
+    if (__elfN(parse_modmetadata)(fp, ef, p_start, p_end) == 0)
 	goto out;
 
     if (ef->kernel)			/* kernel must not depend on anything */
@@ -588,95 +738,230 @@ fake_modname(const char *name)
 
 #if defined(__i386__) && __ELF_WORD_SIZE == 64
 struct mod_metadata64 {
-	int		md_version;	/* structure version MDTV_* */  
-	int		md_type;	/* type of entry MDT_* */
-	u_int64_t	md_data;	/* specific data */
-	u_int64_t	md_cval;	/* common string label */
+    int		md_version;	/* structure version MDTV_* */
+    int		md_type;	/* type of entry MDT_* */
+    uint64_t	md_data;	/* specific data */
+    uint64_t	md_cval;	/* common string label */
+};
+#endif
+#if defined(__amd64__) && __ELF_WORD_SIZE == 32
+struct mod_metadata32 {
+    int		md_version;	/* structure version MDTV_* */
+    int		md_type;	/* type of entry MDT_* */
+    uint32_t	md_data;	/* specific data */
+    uint32_t	md_cval;	/* common string label */
 };
 #endif
 
 int
-__elfN(parse_modmetadata)(struct preloaded_file *fp, elf_file_t ef)
+__elfN(parse_modmetadata)(struct preloaded_file *fp, elf_file_t ef,
+    Elf_Addr p_start, Elf_Addr p_end)
 {
     struct mod_metadata md;
 #if defined(__i386__) && __ELF_WORD_SIZE == 64
     struct mod_metadata64 md64;
+#elif defined(__amd64__) && __ELF_WORD_SIZE == 32
+    struct mod_metadata32 md32;
 #endif
     struct mod_depend *mdepend;
     struct mod_version mver;
-    Elf_Sym sym;
     char *s;
     int error, modcnt, minfolen;
-    Elf_Addr v, p, p_stop;
-
-    if (__elfN(lookup_symbol)(fp, ef, "__start_set_modmetadata_set", &sym) != 0)
-	return ENOENT;
-    p = sym.st_value + ef->off;
-    if (__elfN(lookup_symbol)(fp, ef, "__stop_set_modmetadata_set", &sym) != 0)
-	return ENOENT;
-    p_stop = sym.st_value + ef->off;
+    Elf_Addr v, p;
 
     modcnt = 0;
-    while (p < p_stop) {
-	COPYOUT(p, &v, sizeof(v));
-	error = __elfN(reloc_ptr)(fp, ef, p, &v, sizeof(v));
-	if (error == EOPNOTSUPP)
-	    v += ef->off;
-	else if (error != 0)
-	    return (error);
+    p = p_start;
+    while (p < p_end) {
+        COPYOUT(p, &v, sizeof(v));
+        error = __elfN(reloc_ptr)(fp, ef, p, &v, sizeof(v));
+        if (error == EOPNOTSUPP)
+            v += ef->off;
+        else if (error != 0)
+            return (error);
 #if defined(__i386__) && __ELF_WORD_SIZE == 64
-	COPYOUT(v, &md64, sizeof(md64));
-	error = __elfN(reloc_ptr)(fp, ef, v, &md64, sizeof(md64));
-	if (error == EOPNOTSUPP) {
-	    md64.md_cval += ef->off;
-	    md64.md_data += ef->off;
-	} else if (error != 0)
-	    return (error);
-	md.md_version = md64.md_version;
-	md.md_type = md64.md_type;
-	md.md_cval = (const char *)(uintptr_t)md64.md_cval;
-	md.md_data = (void *)(uintptr_t)md64.md_data;
+        COPYOUT(v, &md64, sizeof(md64));
+        error = __elfN(reloc_ptr)(fp, ef, v, &md64, sizeof(md64));
+        if (error == EOPNOTSUPP) {
+            md64.md_cval += ef->off;
+            md64.md_data += ef->off;
+        } else if (error != 0)
+            return (error);
+        md.md_version = md64.md_version;
+        md.md_type = md64.md_type;
+        md.md_cval = (const char *)(uintptr_t)md64.md_cval;
+        md.md_data = (void *)(uintptr_t)md64.md_data;
+#elif defined(__amd64__) && __ELF_WORD_SIZE == 32
+        COPYOUT(v, &md32, sizeof(md32));
+        error = __elfN(reloc_ptr)(fp, ef, v, &md32, sizeof(md32));
+        if (error == EOPNOTSUPP) {
+            md32.md_cval += ef->off;
+            md32.md_data += ef->off;
+        } else if (error != 0)
+            return (error);
+        md.md_version = md32.md_version;
+        md.md_type = md32.md_type;
+        md.md_cval = (const char *)(uintptr_t)md32.md_cval;
+        md.md_data = (void *)(uintptr_t)md32.md_data;
 #else
-	COPYOUT(v, &md, sizeof(md));
-	error = __elfN(reloc_ptr)(fp, ef, v, &md, sizeof(md));
-	if (error == EOPNOTSUPP) {
-	    md.md_cval += ef->off;
-	    md.md_data = (char *)md.md_data + ef->off;
-	} else if (error != 0)
-	    return (error);
+        COPYOUT(v, &md, sizeof(md));
+        error = __elfN(reloc_ptr)(fp, ef, v, &md, sizeof(md));
+        if (error == EOPNOTSUPP) {
+            md.md_cval += ef->off;
+            md.md_data = (void *)((uintptr_t)md.md_data +
+                    (uintptr_t)ef->off);
+        } else if (error != 0)
+            return (error);
 #endif
-	p += sizeof(Elf_Addr);
-	switch(md.md_type) {
-	  case MDT_DEPEND:
-	    if (ef->kernel)		/* kernel must not depend on anything */
-	      break;
-	    s = strdupout((vm_offset_t)md.md_cval);
-	    minfolen = sizeof(*mdepend) + strlen(s) + 1;
-	    mdepend = malloc(minfolen);
-	    if (mdepend == NULL)
-		return ENOMEM;
-	    COPYOUT((vm_offset_t)md.md_data, mdepend, sizeof(*mdepend));
-	    strcpy((char*)(mdepend + 1), s);
-	    free(s);
-	    file_addmetadata(fp, MODINFOMD_DEPLIST, minfolen, mdepend);
-	    free(mdepend);
-	    break;
-	  case MDT_VERSION:
-	    s = strdupout((vm_offset_t)md.md_cval);
-	    COPYOUT((vm_offset_t)md.md_data, &mver, sizeof(mver));
-	    file_addmodule(fp, s, mver.mv_version, NULL);
-	    free(s);
-	    modcnt++;
-	    break;
-	}
+        p += sizeof(Elf_Addr);
+        switch(md.md_type) {
+        case MDT_DEPEND:
+            if (ef->kernel) /* kernel must not depend on anything */
+                break;
+            s = strdupout((vm_offset_t)md.md_cval);
+            minfolen = sizeof(*mdepend) + strlen(s) + 1;
+            mdepend = malloc(minfolen);
+            if (mdepend == NULL)
+                return ENOMEM;
+            COPYOUT((vm_offset_t)md.md_data, mdepend,
+                    sizeof(*mdepend));
+            strcpy((char*)(mdepend + 1), s);
+            free(s);
+            file_addmetadata(fp, MODINFOMD_DEPLIST, minfolen,
+                    mdepend);
+            free(mdepend);
+            break;
+        case MDT_VERSION:
+            s = strdupout((vm_offset_t)md.md_cval);
+            COPYOUT((vm_offset_t)md.md_data, &mver, sizeof(mver));
+            file_addmodule(fp, s, mver.mv_version, NULL);
+            free(s);
+            modcnt++;
+            break;
+        }
     }
     if (modcnt == 0) {
-	s = fake_modname(fp->f_name);
-	file_addmodule(fp, s, 1, NULL);
-	free(s);
+        s = fake_modname(fp->f_name);
+        file_addmodule(fp, s, 1, NULL);
+        free(s);
     }
     return 0;
 }
+
+int
+__elfN(load_modmetadata)(struct preloaded_file *fp, uint64_t dest)
+{
+    struct elf_file		 ef;
+    int			 err, i, j;
+    Elf_Shdr		*sh_meta, *shdr = NULL;
+    Elf_Shdr		*sh_data[2];
+    char			*shstrtab = NULL;
+    size_t			 size;
+    Elf_Addr		 p_start, p_end;
+
+    bzero(&ef, sizeof(struct elf_file));
+    ef.fd = -1;
+
+    err = __elfN(load_elf_header)(fp->f_name, &ef);
+    if (err != 0)
+        goto out;
+
+    if (ef.kernel == 1 || ef.ehdr->e_type == ET_EXEC) {
+        ef.kernel = 1;
+    } else if (ef.ehdr->e_type != ET_DYN) {
+        err = EFTYPE;
+        goto out;
+    }
+
+    size = (size_t)ef.ehdr->e_shnum * (size_t)ef.ehdr->e_shentsize;
+    shdr = alloc_pread(ef.fd, ef.ehdr->e_shoff, size);
+    if (shdr == NULL) {
+        err = ENOMEM;
+        goto out;
+    }
+
+    /* Load shstrtab. */
+    shstrtab = alloc_pread(ef.fd, shdr[ef.ehdr->e_shstrndx].sh_offset,
+        shdr[ef.ehdr->e_shstrndx].sh_size);
+    if (shstrtab == NULL) {
+        printf("\nelf" __XSTRING(__ELF_WORD_SIZE)
+          "load_modmetadata: unable to load shstrtab\n");
+        err = EFTYPE;
+        goto out;
+    }
+
+    /* Find set_modmetadata_set and data sections. */
+    sh_data[0] = sh_data[1] = sh_meta = NULL;
+    for (i = 0, j = 0; i < ef.ehdr->e_shnum; i++) {
+        if (strcmp(&shstrtab[shdr[i].sh_name],
+                "set_modmetadata_set") == 0) {
+            sh_meta = &shdr[i];
+        }
+        if ((strcmp(&shstrtab[shdr[i].sh_name], ".data") == 0) ||
+          (strcmp(&shstrtab[shdr[i].sh_name], ".rodata") == 0)) {
+            sh_data[j++] = &shdr[i];
+        }
+    }
+    if (sh_meta == NULL || sh_data[0] == NULL || sh_data[1] == NULL) {
+        printf("\nelf" __XSTRING(__ELF_WORD_SIZE)
+                "load_modmetadata: unable to find set_modmetadata_set or data sections\n");
+        err = EFTYPE;
+        goto out;
+    }
+
+    /* Load set_modmetadata_set into memory */
+    err = kern_pread(ef.fd, dest, sh_meta->sh_size, sh_meta->sh_offset);
+    if (err != 0) {
+        printf("\nelf" __XSTRING(__ELF_WORD_SIZE)
+            "load_modmetadata: unable to load set_modmetadata_set: %d\n", err);
+        goto out;
+    }
+    p_start = dest;
+    p_end = dest + sh_meta->sh_size;
+    dest += sh_meta->sh_size;
+
+    /* Load data sections into memory. */
+    err = kern_pread(ef.fd, dest, sh_data[0]->sh_size,
+        sh_data[0]->sh_offset);
+    if (err != 0) {
+        printf("\nelf" __XSTRING(__ELF_WORD_SIZE)
+            "load_modmetadata: unable to load data: %d\n", err);
+        goto out;
+    }
+
+    /*
+     * We have to increment the dest, so that the offset is the same into
+     * both the .rodata and .data sections.
+     */
+    ef.off = -(sh_data[0]->sh_addr - dest);
+    dest += (sh_data[1]->sh_addr - sh_data[0]->sh_addr);
+
+    err = kern_pread(ef.fd, dest, sh_data[1]->sh_size,
+        sh_data[1]->sh_offset);
+    if (err != 0) {
+        printf("\nelf" __XSTRING(__ELF_WORD_SIZE)
+            "load_modmetadata: unable to load data: %d\n", err);
+        goto out;
+    }
+
+    err = __elfN(parse_modmetadata)(fp, &ef, p_start, p_end);
+    if (err != 0) {
+        printf("\nelf" __XSTRING(__ELF_WORD_SIZE)
+            "load_modmetadata: unable to parse metadata: %d\n", err);
+        goto out;
+    }
+
+out:
+    if (shstrtab != NULL)
+        free(shstrtab);
+    if (shdr != NULL)
+        free(shdr);
+    if (ef.firstpage != NULL)
+        free(ef.firstpage);
+    if (ef.fd != -1)
+        close(ef.fd);
+    return (err);
+}
+
 
 static unsigned long
 elf_hash(const char *name)

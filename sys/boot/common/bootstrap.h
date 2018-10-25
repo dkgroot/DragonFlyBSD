@@ -234,13 +234,15 @@ int			mod_load(char *name, struct mod_depend *verinfo, int argc, char *argv[]);
 int			mod_loadkld(const char *name, int argc, char *argv[]);
 
 struct preloaded_file *file_alloc(void);
+//int file_loadraw(char *type, char *name);
+struct preloaded_file *file_loadraw(const char *fname, char *type, int insert);
 struct preloaded_file *file_findfile(char *name, char *type);
 struct file_metadata *file_findmetadata(struct preloaded_file *fp, int type);
 void file_discard(struct preloaded_file *fp);
 void file_addmetadata(struct preloaded_file *fp, int type, size_t size, void *p);
 int  file_addmodule(struct preloaded_file *fp, char *modname, int version,
 	struct kernel_module **newmp);
-
+void file_removemetadata(struct preloaded_file *fp);
 
 /* MI module loaders */
 #ifdef __elfN
@@ -260,6 +262,9 @@ int	__elfN(obj_loadfile)(char *filename, u_int64_t dest,
 int	__elfN(reloc)(struct elf_file *ef, symaddr_fn *symaddr,
 	    const void *reldata, int reltype, Elf_Addr relbase,
 	    Elf_Addr dataaddr, void *data, size_t len);
+int 	__elfN(loadfile_raw)(char *filename, uint64_t dest,
+            struct preloaded_file **result, int multiboot);
+int 	__elfN(load_modmetadata)(struct preloaded_file *fp, uint64_t dest);	    
 #endif
 
 /*
@@ -309,6 +314,30 @@ struct arch_switch
     /* Perform ISA byte port I/O (only for systems with ISA) */
     int		(*arch_isainb)(int port);
     void	(*arch_isaoutb)(int port, int value);
+
+    /*
+     * Interface to adjust the load address according to the "object"
+     * being loaded.
+     */
+    uint64_t	(*arch_loadaddr)(u_int type, void *data, uint64_t addr);
+#define	LOAD_ELF	1	/* data points to the ELF header. */
+#define	LOAD_RAW	2	/* data points to the file name. */
+
+    /*
+     * Interface to inform MD code about a loaded (ELF) segment. This
+     * can be used to flush caches and/or set up translations.
+     */
+#ifdef __elfN
+    void	(*arch_loadseg)(Elf_Ehdr *eh, Elf_Phdr *ph, uint64_t delta);
+#else
+    void	(*arch_loadseg)(void *eh, void *ph, uint64_t delta);
+#endif
+
+    /* Probe ZFS pool(s), if needed. */
+    void	(*arch_zfs_probe)(void);
+
+    /* For kexec-type loaders, get ksegment structure */
+    void	(*arch_kexec_kseg_get)(int *nseg, void **kseg);    
 };
 extern struct arch_switch archsw;
 
